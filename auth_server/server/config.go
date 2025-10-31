@@ -17,11 +17,17 @@
 package server
 
 import (
+	"crypto"
+	"crypto/ecdsa"
+	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io/ioutil"
+	"math/big"
 	"os"
 	"strings"
 	"time"
@@ -70,6 +76,7 @@ type ServerConfig struct {
 
 	publicKey  libtrust.PublicKey
 	privateKey libtrust.PrivateKey
+	sigAlg     string
 }
 
 type LetsEncryptConfig struct {
@@ -79,13 +86,16 @@ type LetsEncryptConfig struct {
 }
 
 type TokenConfig struct {
-	Issuer     string `yaml:"issuer,omitempty"`
-	CertFile   string `yaml:"certificate,omitempty"`
-	KeyFile    string `yaml:"key,omitempty"`
-	Expiration int64  `yaml:"expiration,omitempty"`
+	Issuer             string `yaml:"issuer,omitempty"`
+	CertFile           string `yaml:"certificate,omitempty"`
+	KeyFile            string `yaml:"key,omitempty"`
+	Expiration         int64  `yaml:"expiration,omitempty"`
+	DisableLegacyKeyID bool   `yaml:"disable_legacy_key_id,omitempty"`
 
 	publicKey  libtrust.PublicKey
 	privateKey libtrust.PrivateKey
+	sigAlg     string
+	keyID      string
 }
 
 // TLSCipherSuitesValues maps CipherSuite names as strings to the actual values
@@ -171,7 +181,7 @@ func validate(c *Config) error {
 		return fmt.Errorf("expiration must be positive, got %d", c.Token.Expiration)
 	}
 	if c.Users == nil && c.ExtAuth == nil && c.GoogleAuth == nil && c.GitHubAuth == nil && c.GitlabAuth == nil && c.OIDCAuth == nil && c.LDAPAuth == nil && c.MongoAuth == nil && c.XormAuthn == nil && c.PluginAuthn == nil {
-		return errors.New("no auth methods are configured, this is probably a mistake. Use an empty user map if you really want to deny everyone.")
+		return errors.New("no auth methods are configured, this is probably a mistake. Use an empty user map if you really want to deny everyone")
 	}
 	if c.MongoAuth != nil {
 		if err := c.MongoAuth.Validate("mongo_auth"); err != nil {
@@ -191,11 +201,20 @@ func validate(c *Config) error {
 			}
 			gac.ClientSecret = strings.TrimSpace(string(contents))
 		}
-		if gac.ClientId == "" || gac.ClientSecret == "" || gac.TokenDB == "" {
-			return errors.New("google_auth.{client_id,client_secret,token_db} are required.")
+		if gac.ClientId == "" || gac.ClientSecret == "" || (gac.LevelTokenDB != nil && gac.LevelTokenDB.Path == "") {
+			return errors.New("google_auth.{client_id,client_secret,level_token_db.path} are required")
 		}
+
+		if gac.ClientId == "" || gac.ClientSecret == "" || (gac.GCSTokenDB != nil && (gac.GCSTokenDB.Bucket == "" || gac.GCSTokenDB.ClientSecretFile == "")) {
+			return errors.New("google_auth.{client_id,client_secret,gcs_token_db{bucket,client_secret_file}} are required")
+		}
+
+		if gac.ClientId == "" || gac.ClientSecret == "" || (gac.RedisTokenDB != nil && gac.RedisTokenDB.ClientOptions == nil && gac.RedisTokenDB.ClusterOptions == nil) {
+			return errors.New("google_auth.{client_id,client_secret,redis_token_db.{redis_options,redis_cluster_options}} are required")
+		}
+
 		if gac.HTTPTimeout <= 0 {
-			gac.HTTPTimeout = 10
+			gac.HTTPTimeout = time.Duration(10 * time.Second)
 		}
 	}
 	if ghac := c.GitHubAuth; ghac != nil {
@@ -206,8 +225,8 @@ func validate(c *Config) error {
 			}
 			ghac.ClientSecret = strings.TrimSpace(string(contents))
 		}
-		if ghac.ClientId == "" || ghac.ClientSecret == "" || (ghac.TokenDB == "" && (ghac.GCSTokenDB == nil && ghac.RedisTokenDB == nil)) {
-			return errors.New("github_auth.{client_id,client_secret,token_db} are required")
+		if ghac.ClientId == "" || ghac.ClientSecret == "" || (ghac.LevelTokenDB != nil && ghac.LevelTokenDB.Path == "") {
+			return errors.New("github_auth.{client_id,client_secret,level_token_db.path} are required")
 		}
 
 		if ghac.ClientId == "" || ghac.ClientSecret == "" || (ghac.GCSTokenDB != nil && (ghac.GCSTokenDB.Bucket == "" || ghac.GCSTokenDB.ClientSecretFile == "")) {
@@ -234,11 +253,26 @@ func validate(c *Config) error {
 			}
 			oidc.ClientSecret = strings.TrimSpace(string(contents))
 		}
-		if oidc.ClientId == "" || oidc.ClientSecret == "" || oidc.TokenDB == "" || oidc.Issuer == "" || oidc.RedirectURL == "" {
-			return errors.New("oidc_auth.{issuer,redirect_url,client_id,client_secret,token_db} are required")
+		if oidc.ClientId == "" || oidc.ClientSecret == "" || oidc.Issuer == "" || oidc.RedirectURL == "" || (oidc.LevelTokenDB != nil && oidc.LevelTokenDB.Path == "") {
+			return errors.New("oidc_auth.{issuer,redirect_url,client_id,client_secret,level_token_db.path} are required")
 		}
+
+		if oidc.ClientId == "" || oidc.ClientSecret == "" || (oidc.GCSTokenDB != nil && (oidc.GCSTokenDB.Bucket == "" || oidc.GCSTokenDB.ClientSecretFile == "")) {
+			return errors.New("oidc_auth.{client_id,client_secret,gcs_token_db{bucket,client_secret_file}} are required")
+		}
+
+		if oidc.ClientId == "" || oidc.ClientSecret == "" || (oidc.RedisTokenDB != nil && oidc.RedisTokenDB.ClientOptions == nil && oidc.RedisTokenDB.ClusterOptions == nil) {
+			return errors.New("oidc_auth.{client_id,client_secret,redis_token_db.{redis_options,redis_cluster_options}} are required")
+		}
+
 		if oidc.HTTPTimeout <= 0 {
-			oidc.HTTPTimeout = 10
+			oidc.HTTPTimeout = time.Duration(10 * time.Second)
+		}
+		if oidc.UserClaim == "" {
+			oidc.UserClaim = "email"
+		}
+		if oidc.Scopes == nil {
+			oidc.Scopes = []string{"openid", "email"}
 		}
 		if oidc.UserClaim == "" {
 			oidc.UserClaim = "email"
@@ -255,8 +289,8 @@ func validate(c *Config) error {
 			}
 			glab.ClientSecret = strings.TrimSpace(string(contents))
 		}
-		if glab.ClientId == "" || glab.ClientSecret == "" || (glab.TokenDB == "" && (glab.GCSTokenDB == nil && glab.RedisTokenDB == nil)) {
-			return errors.New("gitlab_auth.{client_id,client_secret,token_db} are required")
+		if glab.ClientId == "" || glab.ClientSecret == "" || (glab.LevelTokenDB != nil && glab.LevelTokenDB.Path == "") {
+			return errors.New("gitlab_auth.{client_id,client_secret,level_token_db.path} are required")
 		}
 
 		if glab.ClientId == "" || glab.ClientSecret == "" || (glab.GCSTokenDB != nil && (glab.GCSTokenDB.Bucket == "" || glab.GCSTokenDB.ClientSecretFile == "")) {
@@ -317,7 +351,7 @@ func validate(c *Config) error {
 	return nil
 }
 
-func loadCertAndKey(certFile string, keyFile string) (pk libtrust.PublicKey, prk libtrust.PrivateKey, err error) {
+func loadCertAndKey(certFile string, keyFile string) (pk libtrust.PublicKey, prk libtrust.PrivateKey, sigAlg string, err error) {
 	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
 	if err != nil {
 		return
@@ -331,6 +365,11 @@ func loadCertAndKey(certFile string, keyFile string) (pk libtrust.PublicKey, prk
 		return
 	}
 	prk, err = libtrust.FromCryptoPrivateKey(cert.PrivateKey)
+	_, sigAlg, errStr := prk.Sign(strings.NewReader("dummy"), 0)
+	if errStr != nil {
+		err = fmt.Errorf("failed to sign: %s", errStr)
+		return
+	}
 	return
 }
 
@@ -352,7 +391,7 @@ func LoadConfig(fileName string) (*Config, error) {
 		if c.Server.CertFile == "" || c.Server.KeyFile == "" {
 			return nil, fmt.Errorf("failed to load server cert and key: both were not provided")
 		}
-		c.Server.publicKey, c.Server.privateKey, err = loadCertAndKey(c.Server.CertFile, c.Server.KeyFile)
+		c.Server.publicKey, c.Server.privateKey, c.Server.sigAlg, err = loadCertAndKey(c.Server.CertFile, c.Server.KeyFile)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load server cert and key: %s", err)
 		}
@@ -364,7 +403,7 @@ func LoadConfig(fileName string) (*Config, error) {
 		if c.Token.CertFile == "" || c.Token.KeyFile == "" {
 			return nil, fmt.Errorf("failed to load token cert and key: both were not provided")
 		}
-		c.Token.publicKey, c.Token.privateKey, err = loadCertAndKey(c.Token.CertFile, c.Token.KeyFile)
+		c.Token.publicKey, c.Token.privateKey, c.Token.sigAlg, err = loadCertAndKey(c.Token.CertFile, c.Token.KeyFile)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load token cert and key: %s", err)
 		}
@@ -372,12 +411,18 @@ func LoadConfig(fileName string) (*Config, error) {
 	}
 
 	if serverConfigured && !tokenConfigured {
-		c.Token.publicKey, c.Token.privateKey = c.Server.publicKey, c.Server.privateKey
+		c.Token.publicKey, c.Token.privateKey, c.Token.sigAlg = c.Server.publicKey, c.Server.privateKey, c.Server.sigAlg
 		tokenConfigured = true
 	}
 
 	if !tokenConfigured {
 		return nil, fmt.Errorf("failed to load token cert and key: none provided")
+	}
+
+	if c.Token.DisableLegacyKeyID {
+		c.Token.keyID = getRFC7638Thumbprint(c.Token.publicKey.CryptoPublicKey())
+	} else {
+		c.Token.keyID = c.Token.publicKey.KeyID()
 	}
 
 	if !serverConfigured && c.Server.LetsEncrypt.Email != "" {
@@ -393,4 +438,33 @@ func LoadConfig(fileName string) (*Config, error) {
 	}
 
 	return c, nil
+}
+
+// getRFC7638Thumbprint will generate the JWK thumbprint (https://www.rfc-editor.org/rfc/rfc7638.html) for a crypto.PublicKey.
+//
+// Copied from https://github.com/distribution/distribution/blob/51bdcb7bac069f263ce238db6bd0610759c2635f/registry/auth/token/util.go#L63
+func getRFC7638Thumbprint(publickey crypto.PublicKey) string {
+	var payload string
+
+	switch pubkey := publickey.(type) {
+	case *rsa.PublicKey:
+		e_big := big.NewInt(int64(pubkey.E)).Bytes()
+
+		e := base64.RawURLEncoding.EncodeToString(e_big)
+		n := base64.RawURLEncoding.EncodeToString(pubkey.N.Bytes())
+
+		payload = fmt.Sprintf(`{"e":"%s","kty":"RSA","n":"%s"}`, e, n)
+	case *ecdsa.PublicKey:
+		params := pubkey.Params()
+		crv := params.Name
+		x := base64.RawURLEncoding.EncodeToString(params.Gx.Bytes())
+		y := base64.RawURLEncoding.EncodeToString(params.Gy.Bytes())
+
+		payload = fmt.Sprintf(`{"crv":"%s","kty":"EC","x":"%s","y":"%s"}`, crv, x, y)
+	default:
+		return ""
+	}
+
+	shasum := sha256.Sum256([]byte(payload))
+	return base64.RawURLEncoding.EncodeToString(shasum[:])
 }

@@ -84,6 +84,11 @@ token:  # Settings for the tokens.
   # If not specified, server's TLS certificate and key are used.
   # certificate: "..."
   # key: "..."
+  # Whether the legacy libtrust key ID should be embedded in the `kid` header of the token.
+  # Set this to true if you are using registry v3, and to false if you are using registry v2.
+  # If set to true, the JWK thumbprint (see https://www.rfc-editor.org/rfc/rfc7638.html) of the certificate will be embedded instead.
+  # Defaults to false.
+  # disable_legacy_key_id: false
 
 # Authentication methods. All are tried, any one returning success is sufficient.
 # At least one must be configured. If you want an unauthenticated public setup,
@@ -115,9 +120,12 @@ google_auth:
   # client_secret: "verysecret"
   client_secret_file: "/path/to/client_secret.txt"
   # Where to store server tokens. Required.
-  token_db: "/somewhere/to/put/google_tokens.ldb"
+  level_token_db:
+    path: "/somewhere/to/put/google_tokens.ldb"
+    # Optional token hash cost for bcrypt hashing
+    # token_hash_cost: 5
   # How long to wait when talking to Google servers. Optional.
-  http_timeout: 10
+  http_timeout: "10s"
 
 # GitHub authentication.
 # ==! NB: DO NOT ENTER YOUR GITHUB PASSWORD AT "docker login". IT WILL NOT WORK.
@@ -135,8 +143,11 @@ github_auth:
   # want to have sensitive information checked in.
   # client_secret: "verysecret"
   client_secret_file: "/path/to/client_secret.txt"
-  # Either token_db file for storing of server tokens.
-  token_db: "/somewhere/to/put/github_tokens.ldb"
+  # Either level_token_db file for storing of server tokens.
+  level_token_db:
+    path: "/somewhere/to/put/github_tokens.ldb"
+    # Optional token hash cost for bcrypt hashing
+    # token_hash_cost: 5
   # or google cloud storage for storing of the sensitive information,
   gcs_token_db:
     bucket: "tokenBucket"
@@ -181,10 +192,13 @@ oidc_auth:
   # client_secret_file: "/path/to/client_secret.txt"
   #
   # a file in which the tokens should be stored. Does not have to exist, it will be generated in this case
-  token_db: "/path/to/tokens.ldb"
+  level_token_db:
+    path: "/path/to/tokens.ldb"
+    # Optional token hash cost for bcrypt hashing
+    # token_hash_cost: 5
   # --- optional ---
   # How long to wait when talking to the OIDC provider.
-  http_timeout: 10
+  http_timeout: "10s"
   # the url of the registry where you want to login. Is used to present the full docker login command.
   registry_url: "url_of_my_beautiful_docker_registry"
   # The claim to use for the username.
@@ -210,8 +224,11 @@ gitlab_auth:
   # want to have sensitive information checked in.
   # client_secret: "verysecret"
   client_secret_file: "/path/to/client_secret.txt"
-  # Either token_db file for storing of server tokens.
-  token_db: "/somewhere/to/put/gitlab_tokens.ldb"
+  # Either level_token_db file for storing of server tokens.
+  level_token_db:
+    path: "/somewhere/to/put/gitlab_tokens.ldb"
+    # Optional token hash cost for bcrypt hashing
+    # token_hash_cost: 5
   # or google cloud storage for storing of the sensitive information,
   gcs_token_db:
     bucket: "tokenBucket"
@@ -271,6 +288,8 @@ ldap_auth:
       attribute: memberOf
       # Special handling to simplify the values to just the common name
       parse_cn: true
+      # lower case the value
+      lower_case: true
 
 mongo_auth:
   # Essentially all options are described here: https://godoc.org/gopkg.in/mgo.v2#DialInfo

@@ -21,7 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -33,12 +33,14 @@ import (
 )
 
 type GoogleAuthConfig struct {
-	Domain           string `yaml:"domain,omitempty"`
-	ClientId         string `yaml:"client_id,omitempty"`
-	ClientSecret     string `yaml:"client_secret,omitempty"`
-	ClientSecretFile string `yaml:"client_secret_file,omitempty"`
-	TokenDB          string `yaml:"token_db,omitempty"`
-	HTTPTimeout      int    `yaml:"http_timeout,omitempty"`
+	Domain           string              `yaml:"domain,omitempty"`
+	ClientId         string              `yaml:"client_id,omitempty"`
+	ClientSecret     string              `yaml:"client_secret,omitempty"`
+	ClientSecretFile string              `yaml:"client_secret_file,omitempty"`
+	LevelTokenDB     *LevelDBStoreConfig `yaml:"level_token_db,omitempty"`
+	GCSTokenDB       *GCSStoreConfig     `yaml:"gcs_token_db,omitempty"`
+	RedisTokenDB     *RedisStoreConfig   `yaml:"redis_token_db,omitempty"`
+	HTTPTimeout      time.Duration       `yaml:"http_timeout,omitempty"`
 }
 
 type GoogleAuthRequest struct {
@@ -127,16 +129,30 @@ type GoogleAuth struct {
 }
 
 func NewGoogleAuth(c *GoogleAuthConfig) (*GoogleAuth, error) {
-	db, err := NewTokenDB(c.TokenDB)
+	var db TokenDB
+	var err error
+	var dbName string
+
+	switch {
+	case c.GCSTokenDB != nil:
+		db, err = NewGCSTokenDB(c.GCSTokenDB)
+		dbName = "GCS: " + c.GCSTokenDB.Bucket
+	case c.RedisTokenDB != nil:
+		db, err = NewRedisTokenDB(c.RedisTokenDB)
+		dbName = db.(*redisTokenDB).String()
+	default:
+		db, err = NewTokenDB(c.LevelTokenDB)
+		dbName = c.LevelTokenDB.Path
+	}
 	if err != nil {
 		return nil, err
 	}
-	glog.Infof("Google auth token DB at %s", c.TokenDB)
+	glog.Infof("Google auth token DB at %s", dbName)
 	google_auth, _ := static.ReadFile("data/google_auth.tmpl")
 	return &GoogleAuth{
 		config: c,
 		db:     db,
-		client: &http.Client{Timeout: 10 * time.Second},
+		client: &http.Client{Timeout: c.HTTPTimeout},
 		tmpl:   template.Must(template.New("google_auth").Parse(string(google_auth))),
 	}, nil
 }
@@ -146,7 +162,7 @@ func (ga *GoogleAuth) DoGoogleAuth(rw http.ResponseWriter, req *http.Request) {
 		ga.doGoogleAuthPage(rw, req)
 		return
 	}
-	gauthRequest, _ := ioutil.ReadAll(req.Body)
+	gauthRequest, _ := io.ReadAll(req.Body)
 	glog.V(2).Infof("gauth request: %s", string(gauthRequest))
 	var gar GoogleAuthRequest
 	err := json.Unmarshal(gauthRequest, &gar)
@@ -187,7 +203,7 @@ func (ga *GoogleAuth) doGoogleAuthCreateToken(rw http.ResponseWriter, code strin
 		http.Error(rw, fmt.Sprintf("Error talking to Google auth backend: %s", err), http.StatusServiceUnavailable)
 		return
 	}
-	codeResp, _ := ioutil.ReadAll(resp.Body)
+	codeResp, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	glog.V(2).Infof("Code to token resp: %s", strings.Replace(string(codeResp), "\n", " ", -1))
 
@@ -246,7 +262,7 @@ func (ga *GoogleAuth) getIDTokenInfo(token string) (*GoogleTokenInfo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("could not verify token %s: %s", token, err)
 	}
-	body, _ := ioutil.ReadAll(resp.Body)
+	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 
 	var ti GoogleTokenInfo
@@ -301,7 +317,7 @@ func (ga *GoogleAuth) refreshAccessToken(refreshToken string) (rtr RefreshTokenR
 		err = fmt.Errorf("Error talking to Google auth backend: %s", err)
 		return
 	}
-	respStr, _ := ioutil.ReadAll(resp.Body)
+	respStr, _ := io.ReadAll(resp.Body)
 	glog.V(2).Infof("Refresh token resp: %s", strings.Replace(string(respStr), "\n", " ", -1))
 
 	err = json.Unmarshal(respStr, &rtr)
@@ -318,7 +334,7 @@ func (ga *GoogleAuth) validateAccessToken(toktype, token string) (user string, e
 	if err != nil {
 		return
 	}
-	respStr, _ := ioutil.ReadAll(resp.Body)
+	respStr, _ := io.ReadAll(resp.Body)
 	glog.V(2).Infof("Access token validation rrsponse: %s", strings.Replace(string(respStr), "\n", " ", -1))
 	var pr ProfileResponse
 	err = json.Unmarshal(respStr, &pr)

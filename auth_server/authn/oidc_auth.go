@@ -22,7 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -48,9 +48,11 @@ type OIDCAuthConfig struct {
 	ClientSecret     string `yaml:"client_secret,omitempty"`
 	ClientSecretFile string `yaml:"client_secret_file,omitempty"`
 	// path where the tokendb should be stored within the container
-	TokenDB string `yaml:"token_db,omitempty"`
+	LevelTokenDB *LevelDBStoreConfig `yaml:"level_token_db,omitempty"`
+	GCSTokenDB   *GCSStoreConfig     `yaml:"gcs_token_db,omitempty"`
+	RedisTokenDB *RedisStoreConfig   `yaml:"redis_token_db,omitempty"`
 	// --- optional ---
-	HTTPTimeout int `yaml:"http_timeout,omitempty"`
+	HTTPTimeout time.Duration `yaml:"http_timeout,omitempty"`
 	// the URL of the docker registry. Used to generate a full docker login command after authentication
 	RegistryURL string `yaml:"registry_url,omitempty"`
 	// --- optional ---
@@ -92,11 +94,26 @@ type OIDCAuth struct {
 Creates everything necessary for OIDC auth.
 */
 func NewOIDCAuth(c *OIDCAuthConfig) (*OIDCAuth, error) {
-	db, err := NewTokenDB(c.TokenDB)
+	var db TokenDB
+	var err error
+	var dbName string
+
+	switch {
+	case c.GCSTokenDB != nil:
+		db, err = NewGCSTokenDB(c.GCSTokenDB)
+		dbName = "GCS: " + c.GCSTokenDB.Bucket
+	case c.RedisTokenDB != nil:
+		db, err = NewRedisTokenDB(c.RedisTokenDB)
+		dbName = db.(*redisTokenDB).String()
+	default:
+		db, err = NewTokenDB(c.LevelTokenDB)
+		dbName = c.LevelTokenDB.Path
+	}
+
 	if err != nil {
 		return nil, err
 	}
-	glog.Infof("OIDC auth token DB at %s", c.TokenDB)
+	glog.Infof("OIDC auth token DB at %s", dbName)
 	ctx := context.Background()
 	oidcAuth, _ := static.ReadFile("data/oidc_auth.tmpl")
 	oidcAuthResult, _ := static.ReadFile("data/oidc_auth_result.tmpl")
@@ -115,7 +132,7 @@ func NewOIDCAuth(c *OIDCAuthConfig) (*OIDCAuth, error) {
 	return &OIDCAuth{
 		config:     c,
 		db:         db,
-		client:     &http.Client{Timeout: 10 * time.Second},
+		client:     &http.Client{Timeout: c.HTTPTimeout},
 		tmpl:       template.Must(template.New("oidc_auth").Parse(string(oidcAuth))),
 		tmplResult: template.Must(template.New("oidc_auth_result").Parse(string(oidcAuthResult))),
 		ctx:        ctx,
@@ -257,7 +274,7 @@ func (ga *OIDCAuth) refreshAccessToken(refreshToken string) (rtr OIDCRefreshToke
 		err = fmt.Errorf("error talking to OIDC auth backend: %s", err)
 		return
 	}
-	respStr, _ := ioutil.ReadAll(resp.Body)
+	respStr, _ := io.ReadAll(resp.Body)
 	glog.V(2).Infof("Refresh token resp: %s", strings.Replace(string(respStr), "\n", " ", -1))
 
 	err = json.Unmarshal(respStr, &rtr)
