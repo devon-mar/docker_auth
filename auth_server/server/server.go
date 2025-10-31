@@ -422,7 +422,7 @@ func (as *AuthServer) CreateToken(ar *authRequest, ares []authzResult) (string, 
 	header := token.Header{
 		Type:       "JWT",
 		SigningAlg: tc.sigAlg,
-		KeyID:      tc.publicKey.KeyID(),
+		KeyID:      tc.keyID,
 	}
 	headerJSON, err := json.Marshal(header)
 	if err != nil {
@@ -477,6 +477,8 @@ func (as *AuthServer) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		as.doIndex(rw, req)
 	case req.URL.Path == path_prefix+"/auth":
 		as.doAuth(rw, req)
+	case req.URL.Path == path_prefix+"/auth/token":
+		as.doAuth(rw, req) 
 	case req.URL.Path == path_prefix+"/google_auth" && as.ga != nil:
 		as.ga.DoGoogleAuth(rw, req)
 	case req.URL.Path == path_prefix+"/github_auth" && as.gha != nil:
