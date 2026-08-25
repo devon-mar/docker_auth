@@ -65,6 +65,7 @@ type Config struct {
 	PluginAuthz          *authz.PluginAuthzConfig       `yaml:"plugin_authz,omitempty"`
 	CasbinAuthz          *authz.CasbinAuthzConfig       `yaml:"casbin_authz,omitempty"`
 	ClientCertLabels     string                         `yaml:"client_cert_labels,omitempty"`
+	UseXFCC              bool                           `yaml:"use_xfcc"`
 	AlternateCredentials *AlternateCredentialsConfig    `yaml:"alternate_credentials"`
 }
 

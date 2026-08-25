@@ -35,6 +35,8 @@ import (
 	"github.com/cesanta/docker_auth/auth_server/api"
 	"github.com/cesanta/docker_auth/auth_server/authn"
 	"github.com/cesanta/docker_auth/auth_server/authz"
+
+	"github.com/alecholmes/xfccparser"
 )
 
 var (
@@ -300,6 +302,20 @@ func (as *AuthServer) ParseRequest(req *http.Request) (*authRequest, error) {
 		ar.Labels[as.config.ClientCertLabels+"_O"] = clientCert.Subject.Organization
 		ar.Labels[as.config.ClientCertLabels+"_OU"] = clientCert.Subject.OrganizationalUnit
 		ar.Labels[as.config.ClientCertLabels+"_DNS_NAMES"] = clientCert.DNSNames
+	} else if as.config.ClientCertLabels != "" && as.config.UseXFCC {
+		if xfcc := req.Header.Get("X-Forwarded-Client-Cert"); xfcc != "" {
+			xfccCerts, err := xfccparser.ParseXFCCHeader(xfcc)
+			if err != nil {
+				return nil, fmt.Errorf("xfcc parse: %w", err)
+			}
+			if len(xfccCerts) != 1 {
+				return nil, fmt.Errorf("received %d certs in xfcc", len(xfccCerts))
+			}
+
+			ar.Labels[as.config.ClientCertLabels+"_O"] = xfccCerts[0].Subject.Organization
+			ar.Labels[as.config.ClientCertLabels+"_OU"] = xfccCerts[0].Subject.OrganizationalUnit
+			ar.Labels[as.config.ClientCertLabels+"_DNS_NAMES"] = xfccCerts[0].DNS
+		}
 	}
 	// https://github.com/docker/distribution/blob/1b9ab303a477ded9bdd3fc97e9119fa8f9e58fca/docs/spec/auth/scope.md#resource-scope-grammar
 	if req.FormValue("scope") != "" {
@@ -352,6 +368,7 @@ func alternateCredentials(r *http.Request, config *CredentialSourceConfig) strin
 	}
 	return ""
 }
+
 func (as *AuthServer) Authenticate(ar *authRequest) (bool, api.Labels, error) {
 	for i, a := range as.authenticators {
 		result, labels, err := a.Authenticate(ar.Account, ar.Password)
@@ -478,7 +495,7 @@ func (as *AuthServer) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	case req.URL.Path == path_prefix+"/auth":
 		as.doAuth(rw, req)
 	case req.URL.Path == path_prefix+"/auth/token":
-		as.doAuth(rw, req) 
+		as.doAuth(rw, req)
 	case req.URL.Path == path_prefix+"/google_auth" && as.ga != nil:
 		as.ga.DoGoogleAuth(rw, req)
 	case req.URL.Path == path_prefix+"/github_auth" && as.gha != nil:
